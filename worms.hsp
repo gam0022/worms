@@ -1,0 +1,604 @@
+;===========================================================
+;												2008/11/2
+;	蟲 1.7
+;	http://gmr.blog.shinobi.jp/Category/35/
+;												GAM-22
+;===========================================================
+
+
+/*----------------------------------------------------------
+;	log
+;-----------------------------------------------------------
+
+	[0.1] 蟲がマウスに集まる。
+
+	[0.2] 配色変更、仲間同士で距離を保つように。
+
+	[0.3] 脚の追加。
+
+	[0.4]
+		蟲の変数管理を、var(個体, 長さ)→ var(節) に変更。
+		クリックで蟲回避、右クリックで蟲ランダム破壊。
+		r) 蟲の間接破壊を想定。
+		m) AXsize マイナス、2次元配列の Error7 から解放。
+		d) 処理速度が低下(重大)。
+
+	[0.5]
+		ドラックで描ける線分で、蟲を切断する処理を実装。
+		蟲の長さにより、判定の大きさを変化。
+		起動時、蟲の長さ(10or20)をランダムに決定。
+
+	[0.6]
+		蟲がレザーに触れたときの効果。
+
+	[0.7]
+		血しぶきを再現(廃止するかもしれません)。
+		蟲のグラデーションをランダムに調整。
+
+	[0.8]
+		蟲を全てバラバラにするゲームに。
+		HSPTVランキングに対応。
+
+	[0.9]
+		ルール変更、制限時間内で頑張るゲームに。
+
+	[1.0]
+		三角関数を使う都度、90°補正してたのを、
+		計算の時から左に傾けて、描画する時だけ戻すように。
+
+	[1.1] "winmm.dll"で効果音を再現。練習モード廃止。
+
+	[1.2]
+		midiOutCloseの引数を忘れてたのを修正。
+		exe版にもランキングを実装。効果音を微調整。
+
+	[1.3.β1] 脚の動きを調整。beingの表示を撤廃。
+
+	[1.3]
+		計算式やアルゴリズムを整理、コスト削減。
+		脚の動きを調整、後方では歩幅を小さく。
+
+	[1.4] 背景。
+
+	[1.5]
+		再スタート後、最終関節の破壊で起こる内部エラー7を解消。
+		全滅ボーナス、残り時間*100pt。
+
+	[1.6] 深紅の背景。
+
+	[1.7] 碧の背景。
+
+;-----------------------------------------------------------
+;	パラメータ省略
+;-----------------------------------------------------------
+
+	0. color 22,0,0 → color 22 : -4byte
+	0. color 222,0,22 → color 22,,22 : -0byte
+	1. color 0,0,0 → color
+	2. var(2,0) → var(2)
+	3. redraw 1 → redraw
+
+;-----------------------------------------------------------
+;	数学系メモ
+;-----------------------------------------------------------
+
+	1. 内積 = ax*bx + ay*by
+	2. ベクトル(x,y)の法線 = (-y,x)
+
+;-----------------------------------------------------------
+;	その他
+;-----------------------------------------------------------
+
+	1. 人に見せるようなレベルじゃないことは自覚しています
+	2. コメントの「;」と「//」の使い分けが微妙です
+	3. 配列変数の「b(x)」と「a.x」の使い分けも微妙です
+
+;---------------------------------------------------------*/
+
+	#define __debug 0
+	#define __ss 0
+	#define __hsptv 1
+
+;-----------------------------------------------------------
+;	HSPTV
+;-----------------------------------------------------------
+
+#if __hsptv
+	#runtime "hsptv"
+	#regcmd 18
+	#cmd hsptv_send 0
+	#endif
+
+#if __hsptv=0
+	title "蟲"
+	#define user sysinfo.1
+	#endif
+
+;-----------------------------------------------------------
+;	midi
+;-----------------------------------------------------------
+
+	#uselib "winmm.dll"
+	#func midiOutOpen "midiOutOpen" int, int, int, int, int
+	#func midiOutShortMsg "midiOutShortMsg" int, int
+	#func midiOutClose "midiOutClose" int
+	#define ctype midi_msg(%1,%2,%3) %1 | (%2<<8) | (%3<<16)
+
+	; メッセージを定数化
+	#const midi_laser_set  midi_msg($C0, 102, 0)
+	#const midi_laser_play midi_msg($90, 80, 100)
+	#const midi_laser_stop midi_msg($80, 80, 100)
+
+	#const midi_bld_set  midi_msg($C0+1, 120, 0)
+	#const midi_bld_play midi_msg($90+1, 75, 100)
+
+;-----------------------------------------------------------
+;	定数
+;-----------------------------------------------------------
+
+	; ファイル名
+	#packopt name "worms"
+
+	; 画像バッファ
+	#const buf_win 1
+
+	; 円周率 (無駄に桁が多い)
+	π =		3.141592653589793238462643383279502884197169399375105820974944592307816406286208998628034825342117068
+	; 円周率/2
+	#const πh	1.570796326794896619231321691639751442098584699687552910487472296153908203143104499314017412671058534
+	; 1°
+	#const °	0.017453292519943295769236907684886127134428718885417254560971914401710091146034494436822415696345094
+
+	; key code
+	#const esc 128
+
+	; 非トリガーキー (esc以外)
+	#const non_trigger $7FF^esc
+
+	; 蟲の這う速度
+	#const i_vel 1.75
+
+;-----------------------------------------------------------
+;	起動
+;-----------------------------------------------------------
+
+	// midiOutOpen
+	midiOutOpen varptr.midi; (,0,0,0,0) 略しても大丈夫!?
+	onexit *exit
+
+	// 乱数初期化
+	randomize
+
+	;-------------------------------------------------------
+	;	rank
+	;-------------------------------------------------------
+
+		notesel rank
+
+		#if __hsptv
+			hsptv_send rank, -1
+			#endif
+		#if __hsptv=0
+			exist "rank"
+			if strsize>=0 : noteload "rank"
+			#endif
+
+	// comment
+	comment = "comments please"
+
+	goto *reset
+
+*send
+
+;-----------------------------------------------------------
+;	スコア送信
+;-----------------------------------------------------------
+
+	#if __hsptv
+		hsptv_send rank, score, comment
+		#endif
+
+	#if __hsptv=0
+		repeat
+			noteget v1, cnt*3
+			if score>=int.v1 {
+				noteadd ""+score+"\n"+user+"\n"+comment, cnt*3
+				break
+			}
+			loop
+		#endif
+
+	// mode
+	dim mode
+
+*reset
+
+;-----------------------------------------------------------
+;	部品描画
+;-----------------------------------------------------------
+
+	buffer buf_win, 1280
+
+	// 下地
+	boxf
+	color limit(score/87, 24,256), 24,24
+	boxf 640
+
+	// 形状生成 (節と背景)
+	circle 65,3, 76,32
+	circle 84,3, 95,32
+	circle 64,0, 96,30
+
+	// ダメージ (節と血)
+	color 233
+	circle 32,0, 63,31
+
+	repeat 16
+		// 節
+		gmode 5, 32,32, cnt*cnt+64
+		pos 16+cnt/4, 16+cnt/4
+		grotate buf_win, 64,0, 0, 32-cnt*(2+rnd.7)/2,32-cnt
+		loop
+
+	repeat 4274
+		// 背景
+		gmode 6, 32,32, 8
+		pos 640+rnd.640,rnd.480
+		grotate buf_win
+		loop
+
+	gsel : clrobj
+
+
+;-----------------------------------------------------------
+;	初期化
+;-----------------------------------------------------------
+
+	; 蟲の最大数 (本番は半分)
+	i_max_limit = 280/(mode+1)
+
+	// 蟲の種類
+
+		; 普通
+		i_base_len = 10
+		i_draw_h = 1
+	if rnd.2 {
+		; ムカデ
+		i_base_len = 20
+		i_draw_h = 10
+	}
+
+	dim mcnt
+	dim i_max
+	dim bld_max
+	dim score
+	playing = mode
+
+*main
+
+;-----------------------------------------------------------
+;	main start
+;-----------------------------------------------------------
+
+	// stick
+	key_log = key
+	stick key, non_trigger
+
+	// draw start
+	redraw 0
+
+	// background
+	gmode : pos 0,0
+	gcopy buf_win, 640,0, 640,480
+
+	; 点滅 チカチカ
+	blink ^= 1
+
+;-----------------------------------------------------------
+;	レーザー判定 前編
+;-----------------------------------------------------------
+
+	; レーザーの法線
+	ax = laser_y -mousey
+	ay = -laser_x +mousex
+	; 正規化
+	v1 = sqrt(ax*ax + ay*ay)
+	if v1>0 : v1 = 1.0/v1
+	ax *= v1
+	ay *= v1
+
+;-----------------------------------------------------------
+;	蟲、AI
+;-----------------------------------------------------------
+
+	// 蟲ループ開始
+	repeat i_max
+	rcnt = cnt
+	i_dam.cnt = 0
+
+	if i_type.rcnt {
+	;-------------------------------------------------------
+	;	頭
+	;-------------------------------------------------------
+
+		// 体長
+		i_len.head_index = i_max*(cnt=0) +cnt*(cnt!0) -head_index
+
+		// ターゲット(マウス)に接近、レーザ照射中は回避
+		i_target.cnt = atan(i_y(cnt)-mousey, i_x(cnt)-mousex) +π*(key=0)
+
+		repeat i_max
+			if rcnt!cnt & i_type.cnt {
+			// 頭が相手の範囲なら回避
+				v1 = 4*i_len.cnt
+				v2 = cnt +i_len(cnt)/2
+				x = i_x(rcnt) -i_x(v2)
+				y = i_y(rcnt) -i_y(v2)
+				if (x*x+y*y) <= v1*v1 {
+					i_target.rcnt = atan(y,x)
+				}
+				#if __debug
+					if (rcnt=0) | (rcnt=i_len & cnt=0) {
+						color 30,30,30
+						circle i_x(v2)-v1,i_y(v2)-v1, i_x(v2)+v1,i_y(v2)+v1, 0
+					}
+					#endif
+			}
+			loop
+		#if __debug
+			line i_x(rcnt),i_y(rcnt), i_x(rcnt)+cos(i_target.rcnt)*50, i_y(rcnt)+sin(i_target.rcnt)*50
+			#endif
+
+		// ターゲットから角度がついたら (内積)
+		if cos(i_r.cnt)*cos(i_target.cnt)+sin(i_r.cnt)*sin(i_target.cnt) <= 0.5 {
+			; 右か左、曲がる方向を決定 (法線の内積)
+			i_snake.cnt = 0.05 - 0.1*(cos(i_r.cnt)*sin(i_target.cnt) - sin(i_r.cnt)*cos(i_target.cnt) <=0)
+		}
+
+		// 頭移動
+		i_r.cnt += i_snake.cnt
+		v1 = i_len(cnt)!1
+		i_x.cnt += cos(i_r.cnt) *i_vel *v1
+		i_y.cnt += sin(i_r.cnt) *i_vel *v1
+
+		// head_index
+		head_index = cnt
+
+	} else {
+	;-------------------------------------------------------
+	;	体
+	;-------------------------------------------------------
+
+		// 体移動(っていうか引っ張る)
+		i_r.cnt = atan( i_y(cnt-1)-i_y(cnt), i_x(cnt-1)-i_x(cnt) )
+		i_x.cnt = i_x(cnt-1) - cos(i_r.cnt)*8
+		i_y.cnt = i_y(cnt-1) - sin(i_r.cnt)*8
+	}
+
+	if i_type.cnt:else {
+	;-------------------------------------------------------
+	;	レーザー判定 後編
+	;-------------------------------------------------------
+
+		; 蟲を線分に
+		bx1 = i_x(cnt-1)
+		by1 = i_y(cnt-1)
+		bx2 = i_x(cnt)
+		by2 = i_y(cnt)
+		#if __debug
+			color 200 : line bx1,by1, bx2,by2
+			#endif
+		; 以下、説明不可
+		if (ax*(bx2-bx1) + ay*(by2-by1))!0 {
+			v2 = -(ax*bx1 + ay*by1 - (laser_x*ax + laser_y*ay)) / (ax*(bx2-bx1) + ay*(by2-by1))
+			if v2>0 & v2<=1 {
+				x = bx1+(bx2-bx1)*v2
+				y = by1+(by2-by1)*v2
+				if  (laser_x-x)*(mousex-x)+(laser_y-y)*(mousey-y) < 0 {
+					if key_log {
+						if key:else{
+							; スコア換算
+							if bld_max {
+								v1 = 100-mcnt+bld_cnt(bld_max-1)
+								; point = 基本ポンイント +同時切断ボーナス +全滅ボーナス
+								point.bld_max = limit(v1,0,100) +233*(v1>=100) +time*100*(bld_max=(i_max-i_max_limit/i_base_len-1))
+								score += point(bld_max) *playing
+							}
+							; 切断!!
+							i_type.cnt ++
+							; 血しぶき
+							bld_t.bld_max = cnt
+							bld_cnt.bld_max = mcnt
+							bld_max ++
+							; 断末魔の叫び(謎?)
+							midiOutShortMsg midi, midi_bld_set
+							midiOutShortMsg midi, midi_bld_play
+						}
+						i_dam.cnt = blink
+					}
+				}
+			}
+		}
+	}
+
+;-----------------------------------------------------------
+;	描画
+;-----------------------------------------------------------
+
+	// 蟲
+	x = i_x.cnt
+	y = i_y.cnt
+	r = i_r.cnt +πh
+
+	; 脚
+	v1 = r +sin (π *(mcnt+cnt*2)/10) /(2+(cnt-head_index)/10)
+	v2 = (0.15/i_draw_h)*i_w(cnt) +9
+	color 200,200,200
+	line x,y, x+cos(v1)*v2, y+sin(v1)*v2
+	color 128,128,128
+	line x,y, x-cos(v1)*v2, y-sin(v1)*v2
+
+	; 体
+	gmode 2, 32,32
+	pos x,y
+	grotate buf_win, 32*i_dam(cnt),0, r, 17 +(0.2/i_draw_h)*i_w(cnt),9
+
+	// 蟲ループ終了
+	loop
+
+	// 血しぶき
+	repeat bld_max
+		v1 = bld_t.cnt
+		v2 = mcnt-bld_cnt.cnt
+		// point
+		if v2<=10 {
+			color limit(point(cnt)-v2*4,33,255)
+			pos i_x(v1)+10,i_y(v1)+10
+			mes "+"+point.cnt
+		}
+		repeat v2*(v2<=26), 8
+			v3 = °*(90+rnd.180) +i_r(v1)
+			pos i_x(v1)-cos(v3)*cnt, i_y(v1)-sin(v3)*cnt
+			gmode 4, 32,32, 222-v2*v2/5
+			grotate buf_win, 32,0, v3, 5-cnt/8, 2
+			loop
+		loop
+
+	// レーザー
+	if key {
+		if key_log:else {
+			// 始点
+			laser_x = double.mousex
+			laser_y = double.mousey
+			; 効果音 再生
+			midiOutShortMsg midi, midi_laser_set
+			midiOutShortMsg midi, midi_laser_play
+		}
+
+		if blink {
+			// 描画
+			hsvcolor mcnt,200,255; カラフル♪
+			line laser_x,laser_y, mousex,mousey
+		}
+	} else {
+		if key_log {
+			; 効果音 停止
+			midiOutShortMsg midi, midi_laser_stop
+		}
+	}
+
+;-----------------------------------------------------------
+;	仕上げ
+;-----------------------------------------------------------
+
+	gmode 5, 1,1, 9
+	color 222,222,222
+
+	if key&esc {
+		; [ESC] リセット
+		dim mode
+		goto *reset
+	}
+
+	if mode {
+		;---------------------------------------------------
+		;	本番
+		;---------------------------------------------------
+		if playing:else {
+			grect 320,240, 0, 400,150
+			pos 188,200
+			if key * blink {
+				mes "可哀想だから、あまり虐めないで下さい"
+			} else {
+				mes "time over..."
+			}
+		}
+		if (time=0)*playing {
+			; タイムオーバー
+			dim playing
+			pos 188,228 : input comment, 200,24, 16
+			pos 388,228 : button "send", *send
+		}
+
+		time -= playing
+	} else {
+		;-------------------------------------------------------
+		;	タイトル
+		;-------------------------------------------------------
+
+			if key {
+				; スタート
+				mode ++
+				time = 2500
+				goto *reset
+			}
+
+			// 蟲
+			font "ＭＳ 明朝", 75
+			pos 270,50 : mes "蟲"
+
+			// ランキング
+			grect 320,300, 0, 550,222
+			font "", 15
+
+			repeat 30, ((mcnt/100)\3)*30
+				noteget v1, cnt
+				y = ((cnt/3)\10)*20 +200
+				if cnt\3:else{
+					pos 80,y : mes "no."+((cnt/3)+1)
+					v1 += "pt"
+				}
+				pos (cnt\3)*100+150,y : mes v1
+				loop
+	}
+
+	// 得点
+	pos 10,4 : mes "score "+score+"pt\ntime "+time
+
+;-----------------------------------------------------------
+;	main - end
+;-----------------------------------------------------------
+
+	// draw end
+	redraw
+
+	// screen shot
+	#if __ss
+		if key&16 : bmpsave "ss_"+gettime(0)+"."+gettime(1)+"."+gettime(3)+"_"+gettime(4)+"."+gettime(5)+".bmp"
+		#endif
+
+	// wait
+	await 30
+
+	// mcnt
+	mcnt ++
+
+	; if (mcnt\20)=0 & (i_max < i_max_limit) { (+2byte)
+	if (mcnt\20) | (i_max >= i_max_limit): else {
+		// 蟲生成
+		repeat i_base_len
+			i_type.i_max = (i_max\i_base_len)=0
+			i_len.i_max = 0
+			i_snake.i_max = π
+			i_target.i_max = π
+			i_w.i_max = (3-cnt)*(cnt-4)
+			i_x.i_max = π*rnd(204)
+			i_y.i_max = 640.0*rnd(2) -80
+			i_r.i_max = π
+			i_max ++
+			loop
+	}
+
+	// loop
+	goto *main
+
+*exit
+	// midiOutClose
+	midiOutClose midi
+
+	// ランキング保存
+	#if __hsptv=0
+		notesave "rank"
+		#endif
+
+	end
